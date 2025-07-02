@@ -1,95 +1,223 @@
-<script lang="ts">
-import { defineComponent, watch, h, useSlots } from 'vue'
-import ContentRendererMarkdown from './ContentRendererMarkdown.vue'
+<script setup lang="ts">
+import { kebabCase, pascalCase } from 'scule'
+import { resolveComponent, toRaw, defineAsyncComponent, computed, type AsyncComponentLoader } from 'vue'
+import type { MDCComment, MDCElement, MDCRoot, MDCText } from '@nuxtjs/mdc'
+import htmlTags from '@nuxtjs/mdc/runtime/parser/utils/html-tags-list'
+import MDCRenderer from '@nuxtjs/mdc/runtime/components/MDCRenderer.vue'
+import { toHast } from 'minimark/hast'
+import { globalComponents, localComponents } from '#content/components'
+import { useRuntimeConfig } from '#imports'
 
-export default defineComponent({
-  name: 'ContentRenderer',
-  props: {
-    /**
-     * The document to render.
-     */
-    value: {
-      type: Object,
-      required: false,
-      default: () => ({})
-    },
+interface Renderable {
+  render?: (props: Record<string, unknown>) => unknown
+  ssrRender?: (props: Record<string, unknown>) => unknown
+}
 
-    /**
-     * Whether or not to render the excerpt.
-     * @default false
-     */
-    excerpt: {
-      type: Boolean,
-      default: false
-    },
+const renderFunctions = ['render', 'ssrRender', '__ssrInlineRender'] as const
 
-    /**
-     * The tag to use for the renderer element if it is used.
-     * @default 'div'
-     */
-    tag: {
-      type: String,
-      default: 'div'
-    }
-  },
-  setup (props) {
-    /**
-     * Watch `props.excerpt` and display error message if not found.
-     */
-    watch(
-      () => props.excerpt,
-      (newExcerpt) => {
-        if (newExcerpt && !props.value?.excerpt) {
-          // eslint-disable-next-line no-console
-          console.warn(`No excerpt found for document content/${props?.value?._path}.${props?.value?._extension}!`)
-          // eslint-disable-next-line no-console
-          console.warn('Make sure to use <!--more--> in your content if you want to use excerpt feature.')
-        }
-      },
-      {
-        immediate: true
-      }
-    )
+const props = defineProps({
+  /**
+   * Content to render
+   */
+  value: {
+    type: Object,
+    required: true,
   },
   /**
-   * Content empty fallback
-   * @slot empty
+   * Render only the excerpt
    */
-  render (ctx: any) {
-    const slots = useSlots()
+  excerpt: {
+    type: Boolean,
+    default: false,
+  },
+  /**
+   * Root tag to use for rendering
+   */
+  tag: {
+    type: String,
+    default: 'div',
+  },
+  /**
+   * The map of custom components to use for rendering.
+   */
+  components: {
+    type: Object,
+    default: () => ({}),
+  },
 
-    const { value, excerpt, tag } = ctx
+  data: {
+    type: Object,
+    default: () => ({}),
+  },
+  /**
+   * Whether or not to render Prose components instead of HTML tags
+   */
+  prose: {
+    type: Boolean,
+    default: undefined,
+  },
+  /**
+   * Root tag to use for rendering
+   */
+  class: {
+    type: [String, Object],
+    default: undefined,
+  },
+  /**
+   * Tags to unwrap separated by spaces
+   * Example: 'ul li'
+   */
+  unwrap: {
+    type: [Boolean, String],
+    default: false,
+  },
+})
 
-    const markdownAST = excerpt ? value?.excerpt : value?.body
+const debug = import.meta.dev
 
-    if (!markdownAST?.children?.length && slots?.empty) {
-      // Fallback on `empty` slot.
-      return slots.empty({ value, excerpt, tag, ...this.$attrs })
-    }
+const body = computed(() => {
+  let body = props.value.body || props.value
+  if (props.excerpt && props.value.excerpt) {
+    body = props.value.excerpt
+  }
+  if (body.type === 'minimal' || body.type === 'minimark') {
+    return toHast({ type: 'minimark', value: body.value })
+  }
 
-    if (slots?.default) {
-      return slots.default({ value, excerpt, tag, ...this.$attrs })
-    }
+  return body
+})
 
-    // Use built-in ContentRendererMarkdown
-    if (markdownAST?.type === 'root' && markdownAST?.children?.length) {
-      return h(
-        ContentRendererMarkdown,
-        {
-          value,
-          excerpt,
-          tag,
-          ...this.$attrs
-        }
-      )
-    }
+const isEmpty = computed(() => !body.value?.children?.length)
 
-    // Fallback on JSON.stringify if no slot at all.
-    return h(
-      'pre',
-      null,
-      JSON.stringify({ message: 'You should use slots with <ContentRenderer>', value, excerpt, tag }, null, 2)
-    )
+const data = computed(() => {
+  const { body, excerpt, ...data } = props.value
+  return {
+    ...data,
+    ...props.data,
   }
 })
+
+const proseComponentMap = Object.fromEntries(['p', 'a', 'blockquote', 'code', 'pre', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'img', 'ul', 'ol', 'li', 'strong', 'table', 'thead', 'tbody', 'td', 'th', 'tr', 'script'].map(t => [t, `prose-${t}`]))
+
+const { mdc } = useRuntimeConfig().public || {}
+const tags = computed(() => ({
+  ...mdc?.components?.prose && props.prose !== false ? proseComponentMap : {},
+  ...mdc?.components?.map || {},
+  ...toRaw(props.data?.mdc?.components || {}),
+  ...props.components,
+}))
+
+const componentsMap = computed(() => {
+  return body.value ? resolveContentComponents(body.value, { tags: tags.value }) : {}
+})
+
+function resolveVueComponent(component: string | Renderable) {
+  let _component: unknown = component
+  if (typeof component === 'string') {
+    if (htmlTags.includes(component)) {
+      return component
+    }
+    if (globalComponents.includes(pascalCase(component))) {
+      _component = resolveComponent(component, false)
+    }
+    else if (localComponents.includes(pascalCase(component))) {
+      const loader: AsyncComponentLoader = () => {
+        return import('#content/components')
+          .then((m) => {
+            const comp = m[pascalCase(component) as keyof typeof m] as unknown as () => unknown
+            return comp ? comp() : undefined
+          })
+      }
+      _component = defineAsyncComponent(loader)
+    }
+    if (typeof _component === 'string') {
+      return _component
+    }
+  }
+
+  if (!_component) {
+    return _component
+  }
+
+  const componentObject = _component as Renderable
+  if ('__asyncLoader' in componentObject) {
+    return componentObject
+  }
+
+  if ('setup' in componentObject) {
+    return defineAsyncComponent(() => Promise.resolve(componentObject as Renderable))
+  }
+
+  return componentObject
+}
+
+function resolveContentComponents(body: MDCRoot, meta: Record<string, unknown>) {
+  if (!body) {
+    return
+  }
+  const components = Array.from(new Set(loadComponents(body, meta as { tags: Record<string, string> })))
+
+  const result = {} as Record<string, unknown>
+  for (const [tag, component] of components) {
+    if (result[tag]) {
+      continue
+    }
+
+    if (typeof component === 'object' && renderFunctions.some(fn => Object.hasOwnProperty.call(component, fn))) {
+      result[tag] = component
+      continue
+    }
+
+    result[tag] = resolveVueComponent(component as string)
+  }
+
+  return result as Exclude<(InstanceType<typeof MDCRenderer>)['$props']['components'], undefined>
+}
+
+function loadComponents(node: MDCRoot | MDCElement, documentMeta: { tags: Record<string, string> }) {
+  const tag = (node as unknown as MDCElement).tag
+  if ((node as unknown as MDCText).type === 'text' || tag === 'binding' || (node as unknown as MDCComment).type === 'comment') {
+    return []
+  }
+  const renderTag = findMappedTag(node as unknown as MDCElement, documentMeta.tags)
+  const components2 = [] as Array<[string, unknown]>
+  if ((node as unknown as MDCRoot).type !== 'root' && !htmlTags.includes(renderTag)) {
+    components2.push([tag, renderTag])
+  }
+  for (const child of node.children || []) {
+    components2.push(...loadComponents(child as MDCElement, documentMeta))
+  }
+  return components2
+}
+
+function findMappedTag(node: MDCElement, tags: Record<string, string>) {
+  const tag = node.tag
+  if (!tag || typeof node.props?.__ignoreMap !== 'undefined') {
+    return tag
+  }
+  return tags[tag] || tags[pascalCase(tag)] || tags[kebabCase(node.tag)] || tag
+}
 </script>
+
+<template>
+  <MDCRenderer
+    v-if="!isEmpty"
+    :body="body"
+    :data="data"
+    :class="props.class"
+    :tag="props.tag"
+    :prose="props.prose"
+    :unwrap="props.unwrap"
+    :components="componentsMap"
+    :data-content-id="debug ? value.id : undefined"
+  />
+  <slot
+    v-else
+    name="empty"
+    :body="body"
+    :data="data"
+    :data-content-id="debug ? value.id : undefined"
+  >
+    <!-- nobody -->
+  </slot>
+</template>

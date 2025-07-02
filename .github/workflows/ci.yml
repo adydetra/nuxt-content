@@ -4,51 +4,29 @@ on:
   push:
     branches:
       - main
+      - feat/*
+      - fix/*
   pull_request:
     branches:
       - main
 
 jobs:
-  # windows:
-  #   runs-on: windows-latest
-
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-node@v3
-  #       with:
-  #         node-version: '16'
-  #     - uses: pnpm/action-setup@v2.4.0
-  #       name: Install pnpm
-  #       id: pnpm-install
-  #       with:
-  #         version: 8
-  #     - run: pnpm install
-  #     - run: pnpm prepare
-  #     - run: pnpm lint
-  #     - run: pnpm build
-  #     - run: pnpm vitest
   ubuntu:
     runs-on: ubuntu-latest
-
+    env:
+      COREPACK_DEFAULT_TO_LATEST: 0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '16'
-      - uses: pnpm/action-setup@v2.4.0
-        name: Install pnpm
-        id: pnpm-install
-        with:
-          version: 8
+          node-version: '20'
+      - run: npm i -g --force corepack && corepack enable
       - run: pnpm install
-      - run: pnpm prepare
+      - run: pnpm dev:prepare
       - run: pnpm lint
-      - run: pnpm build
-      - run: pnpm vitest
-      - name: Release Edge
-        if: |
-          github.event_name == 'push' &&
-          !contains(github.event.head_commit.message, '[skip-release]')
-        run: ./scripts/release-edge.sh
-        env:
-          NODE_AUTH_TOKEN: ${{secrets.NODE_AUTH_TOKEN}}
+      - run: pnpm prepack
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Publish
+        run: pnpx pkg-pr-new publish --compact --no-template --pnpm
+

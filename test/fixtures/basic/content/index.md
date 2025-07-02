@@ -1,4 +1,10 @@
-# Index
+---
+title: Home page
+booleanField: true
+numberField: 1
+arrayField:
+  - item1
+  - item2
+---
 
-
-Hello World
+# Home page

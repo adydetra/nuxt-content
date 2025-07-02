@@ -1,98 +1,113 @@
-import { fileURLToPath } from 'url'
-import { test, describe, expect } from 'vitest'
+import fs from 'node:fs/promises'
+import { createResolver } from '@nuxt/kit'
 import { setup, $fetch } from '@nuxt/test-utils'
-import { testMarkdownParser } from './features/parser-markdown'
-import { testPathMetaTransformer } from './features/transformer-path-meta'
-import { testYamlParser } from './features/parser-yaml'
-import { testNavigation } from './features/navigation'
-// import { testMDCComponent } from './features/mdc-component'
-import { testJSONParser } from './features/parser-json'
-import { testCSVParser } from './features/parser-csv'
-import { testRegex } from './features/regex'
-import { testMarkdownParserExcerpt } from './features/parser-markdown-excerpt'
-import { testParserHooks } from './features/parser-hooks'
-import { testModuleOptions } from './features/module-options'
-import { testContentQuery } from './features/content-query'
-import { testHighlighter } from './features/highlighter'
-import { testMarkdownRenderer } from './features/renderer-markdown'
-import { testParserOptions } from './features/parser-options'
-import { testComponents } from './features/components'
-import { testLocales } from './features/locales'
-import { testIgnores } from './features/ignores'
+import type { Nuxt } from '@nuxt/schema'
+import { afterAll, describe, expect, test } from 'vitest'
+import { loadContentConfig } from '../src/utils/config'
+import { decompressSQLDump } from '../src/runtime/internal/dump'
+import { getTableName } from '../src/utils/collection'
+import { getLocalDatabase } from '../src/utils/database'
+import type { LocalDevelopmentDatabase } from '../src/module'
 
-// const spyConsoleWarn = vi.spyOn(global.console, 'warn')
+const resolver = createResolver(import.meta.url)
 
-describe('Basic usage', async () => {
+async function cleanup() {
+  await fs.rm(resolver.resolve('./fixtures/basic/node_modules'), { recursive: true, force: true })
+  await fs.rm(resolver.resolve('./fixtures/basic/.nuxt'), { recursive: true, force: true })
+  await fs.rm(resolver.resolve('./fixtures/basic/.data'), { recursive: true, force: true })
+}
+
+describe('basic', async () => {
+  await cleanup()
+  afterAll(async () => {
+    await cleanup()
+  })
+
   await setup({
-    rootDir: fileURLToPath(new URL('./fixtures/basic', import.meta.url)),
-    server: true
+    rootDir: resolver.resolve('./fixtures/basic'),
+    dev: true,
   })
 
-  test('Multi part path', async () => {
-    const html = await $fetch('/features/multi-part-path')
-    expect(html).contains('Persian')
+  describe('`content.config.ts`', async () => {
+    test('Default collection is defined', async () => {
+      const rootDir = resolver.resolve('./fixtures/basic')
+      const config = await loadContentConfig({ options: { _layers: [{ config: { rootDir } }] } } as Nuxt)
+
+      // Pages collection + info collection
+      expect(config.collections.length).toBe(2)
+      expect(config.collections.map(c => c.name)).toContain('content')
+
+      const pagesCollection = config.collections.find(c => c.name === 'content')
+      expect(pagesCollection).toBeDefined()
+      expect(pagesCollection?.type).toBe('page')
+      expect(pagesCollection?.source).toBeDefined()
+      expect(pagesCollection?.source![0]).toBeDefined()
+      expect(pagesCollection?.source![0].include).toBe('**')
+    })
   })
 
-  test('Japanese path', async () => {
-    const html = await $fetch('/' + encodeURIComponent('こんにちは'))
-    expect(html).contains('🎨 こんにちは')
+  describe('Local database', () => {
+    let db: LocalDevelopmentDatabase
+    afterAll(async () => {
+      if (db) {
+        await db.close()
+      }
+    })
+    test('is created', async () => {
+      const stat = await fs.stat(resolver.resolve('./fixtures/basic/.data/content/contents.sqlite'))
+      expect(stat?.isFile()).toBe(true)
+    })
+
+    test('load database', async () => {
+      db = await getLocalDatabase({ type: 'sqlite', filename: resolver.resolve('./fixtures/basic/.data/content/contents.sqlite') }, { nativeSqlite: true })
+    })
+
+    test('content table is created', async () => {
+      const cache = await db.database?.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?;`)
+        .all(getTableName('content')) as { name: string }[]
+
+      expect(cache).toBeDefined()
+      expect(cache).toHaveLength(1)
+      expect(cache![0].name).toBe(getTableName('content'))
+    })
   })
 
-  test('Partials specials chars', async () => {
-    const html = await $fetch('/_partial/content-(v2)')
-    expect(html).contains('Content (v2)')
+  describe.skip('SQL dump', () => {
+    test('is generated', async () => {
+      const dump = await import(resolver.resolve('./fixtures/basic/.nuxt/content/database.compressed.mjs')).then(m => m.content)
+
+      const parsedDump = await decompressSQLDump(dump)
+
+      expect(parsedDump.filter(item => item.startsWith('DROP TABLE IF EXISTS'))).toHaveLength(1)
+      expect(parsedDump.filter(item => item.startsWith('CREATE TABLE IF NOT EXISTS'))).toHaveLength(2)
+      // Only info & home page are inserted
+      expect(parsedDump.filter(item => item.startsWith('INSERT INTO'))).toHaveLength(2)
+    })
+
+    test('is downloadable', async () => {
+      const response: string = await $fetch('/__nuxt_content/content/sql_dump.txt', { responseType: 'text' })
+      expect(response).toBeDefined()
+
+      const parsedDump = await decompressSQLDump(response as string)
+
+      expect(parsedDump.filter(item => item.startsWith('DROP TABLE IF EXISTS'))).toHaveLength(1)
+      expect(parsedDump.filter(item => item.startsWith('CREATE TABLE IF NOT EXISTS'))).toHaveLength(2)
+      // Only info & home page is inserted
+      expect(parsedDump.filter(item => item.startsWith('INSERT INTO'))).toHaveLength(2)
+    })
   })
 
-  test('Partials specials chars', async () => {
-    const html = await $fetch('/_partial/markdown')
-    expect(html).contains('><!--[--> Default title <!--]--></h1>')
-    expect(html).contains('<p><!--[-->p1<!--]--></p>')
+  describe('refine retrieved document', () => {
+    test('retrieve document', async () => {
+      const doc: Record<string, unknown> = await $fetch('/api/content/get?path=/')
+
+      expect(doc).toBeDefined()
+      expect(typeof doc.booleanField).toBe('boolean')
+      expect(doc.booleanField).toBe(true)
+      expect(doc.arrayField).toBeDefined()
+      expect(doc.arrayField).toContain('item1')
+      expect(doc.arrayField).toContain('item2')
+      expect(doc.numberField).toBe(1)
+    })
   })
-
-  test('Fetch only title and excerpt', async () => {
-    const html = await $fetch('/excerpt-only')
-    expect(html).contains('Excerpt paragraph')
-    expect(html).not.contains('Rest of the content')
-  })
-
-  // test('Warning for invalid file name', () => {
-  //   expect(spyConsoleWarn).toHaveBeenCalled()
-  //   expect(spyConsoleWarn).toHaveBeenCalledWith('Ignoring [content:with-\'invalid\'-char.md]. File name should not contain any of the following characters: \', ", ?, #, /')
-  // })
-
-  testLocales()
-
-  testComponents()
-
-  testContentQuery()
-
-  testNavigation()
-
-  testMarkdownParser()
-
-  testMarkdownRenderer()
-
-  testMarkdownParserExcerpt()
-
-  testYamlParser()
-
-  testCSVParser()
-
-  testJSONParser()
-
-  testPathMetaTransformer()
-
-  // testMDCComponent()
-
-  testRegex()
-
-  testParserHooks()
-
-  testModuleOptions()
-
-  testHighlighter()
-
-  testParserOptions()
-
-  testIgnores()
 })

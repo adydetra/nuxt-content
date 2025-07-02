@@ -1,0 +1,16 @@
+packages:
+  - ./
+  - playground
+  - docs
+  - examples/*
+  - test/fixtures/*
+onlyBuiltDependencies:
+  - '@parcel/watcher'
+  - '@tailwindcss/oxide'
+  - better-sqlite3
+  - esbuild
+  - sharp
+  - sqlite3
+  - unrs-resolver
+  - vue-demi
+  - workerd
